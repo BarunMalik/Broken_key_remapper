@@ -9,3 +9,4 @@ rdev = "0.5.3"
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.8"
 tray-icon = "0.21.3"
+lazy_static = "1.4.0"

@@ -437,6 +437,7 @@ name = "bekarkeyboard"
 version = "0.1.0"
 dependencies = [
  "eframe",
+ "lazy_static",
  "rdev",
  "serde",
  "toml",
