@@ -1,5 +1,6 @@
 use crate::services::system_tray::init_tray;
 use crate::state::app_state::AppState;
+use crate::state::helper::was_auto_launched;
 use crate::ui;
 use eframe::egui;
 use tray_icon::TrayIcon;
@@ -7,6 +8,8 @@ use tray_icon::TrayIcon;
 pub struct MyApp {
     pub state: AppState,
     tray: Option<TrayIcon>,
+    /// True only on the very first frame — used to minimize if auto-launched.
+    first_frame: bool,
 }
 
 impl MyApp {
@@ -33,20 +36,36 @@ impl MyApp {
     pub fn new(cc: &eframe::CreationContext<'_>, state: AppState) -> Self {
         setup_custom_fonts(&cc.egui_ctx);
 
+        let start_minimized = was_auto_launched();
+
         if state.task_bar {
             let tray = Self::create_tray(cc.egui_ctx.clone(), false);
             Self {
                 state,
                 tray: Some(tray),
+                first_frame: start_minimized,
             }
         } else {
-            Self { state, tray: None }
+            Self {
+                state,
+                tray: None,
+                first_frame: start_minimized,
+            }
         }
     }
 }
 
 impl eframe::App for MyApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // --- Auto-launch: minimize on first frame ---
+        if self.first_frame {
+            self.first_frame = false;
+            #[cfg(target_os = "windows")]
+            {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+            }
+        }
+
         // --- Minimize Instead of Close ---
         if self.state.run_in_background {
             if ctx.input(|i| i.viewport().close_requested()) {

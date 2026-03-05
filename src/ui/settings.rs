@@ -1,5 +1,5 @@
 use crate::state::app_state::AppState;
-use crate::state::helper;
+use crate::state::helper::{self, apply_startup};
 use eframe::egui::{self, Color32, RichText};
 
 pub fn show(ctx: &egui::Context, state: &mut AppState) {
@@ -103,6 +103,7 @@ pub fn show(ctx: &egui::Context, state: &mut AppState) {
                         .clicked()
                     {
                         helper::save_config(state);
+                        apply_startup(state.start_at_startup);
 
                         println!(
                             "Saved (Background={}, Startup={}, Taskbar={})",
