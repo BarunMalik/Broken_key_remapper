@@ -34,7 +34,7 @@ impl MyApp {
         setup_custom_fonts(&cc.egui_ctx);
 
         if state.task_bar {
-            let tray = Self::create_tray(cc.egui_ctx.clone(), true);
+            let tray = Self::create_tray(cc.egui_ctx.clone(), false);
             Self {
                 state,
                 tray: Some(tray),
@@ -70,14 +70,32 @@ impl eframe::App for MyApp {
 
         // --- UI ---
         egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
+            ui.add_space(8.0);
             ui.horizontal(|ui| {
-                if ui.button("🏠 Home").clicked() {
+                ui.add_space(8.0);
+                ui.spacing_mut().item_spacing.x = 16.0;
+
+                if ui
+                    .selectable_label(
+                        self.state.current_screen == "home",
+                        egui::RichText::new("🏠 Home").size(16.0),
+                    )
+                    .clicked()
+                {
                     self.state.current_screen = "home".into();
                 }
-                if ui.button("⚙ Settings").clicked() {
+
+                if ui
+                    .selectable_label(
+                        self.state.current_screen == "settings",
+                        egui::RichText::new("⚙ Settings").size(16.0),
+                    )
+                    .clicked()
+                {
                     self.state.current_screen = "settings".into();
                 }
             });
+            ui.add_space(8.0);
         });
 
         match self.state.current_screen.as_str() {
