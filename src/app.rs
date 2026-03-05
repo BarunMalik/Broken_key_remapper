@@ -1,80 +1,71 @@
+use crate::services::system_tray::init_tray;
 use crate::state::app_state::AppState;
 use crate::ui;
 use eframe::egui;
-
-use tray_icon::{
-    TrayIcon, TrayIconBuilder,
-    menu::{Menu, MenuItem, MenuEvent, MenuId},
-};
+use tray_icon::TrayIcon;
 
 pub struct MyApp {
     pub state: AppState,
     tray: Option<TrayIcon>,
-    show_id: Option<MenuId>,
-    quit_id: Option<MenuId>,
 }
 
 impl MyApp {
+    fn create_tray(egui_ctx: egui::Context, with_logs: bool) -> TrayIcon {
+        init_tray(
+            move || {
+                if with_logs {
+                    println!("Showing!");
+                }
+                //egui_ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                egui_ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                egui_ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                egui_ctx.request_repaint();
+            },
+            move || {
+                if with_logs {
+                    println!("exiting!");
+                }
+                std::process::exit(0);
+            },
+        )
+    }
+
     pub fn new(cc: &eframe::CreationContext<'_>, state: AppState) -> Self {
         setup_custom_fonts(&cc.egui_ctx);
 
         if state.task_bar {
-            let (tray, show_id, quit_id) = create_tray();
+            let tray = Self::create_tray(cc.egui_ctx.clone(), true);
             Self {
                 state,
                 tray: Some(tray),
-                show_id: Some(show_id),
-                quit_id: Some(quit_id),
             }
         } else {
-            Self {
-                state,
-                tray: None,
-                show_id: None,
-                quit_id: None,
-            }
+            Self { state, tray: None }
         }
     }
 }
 
 impl eframe::App for MyApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-
         // --- Minimize Instead of Close ---
         if self.state.run_in_background {
             if ctx.input(|i| i.viewport().close_requested()) {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-            
-            }
-        }
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
 
-        // --- Handle Tray Menu Events ---
-        if let Ok(event) = MenuEvent::receiver().try_recv() {
-
-            if Some(event.id.clone()) == self.show_id {
-                
-                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-
-            }
-
-            if Some(event.id) == self.quit_id {
-                std::process::exit(0);
+                //this is a fix for now (temp fix)
+                //ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
             }
         }
 
         // --- Dynamic Tray Toggle ---
         if self.state.task_bar && self.tray.is_none() {
-            let (tray, show_id, quit_id) = create_tray();
+            let tray = Self::create_tray(ctx.clone(), false);
             self.tray = Some(tray);
-            self.show_id = Some(show_id);
-            self.quit_id = Some(quit_id);
         }
 
         if !self.state.task_bar && self.tray.is_some() {
             self.tray = None;
-            self.show_id = None;
-            self.quit_id = None;
         }
 
         // --- UI ---
@@ -117,25 +108,4 @@ fn setup_custom_fonts(ctx: &egui::Context) {
         .insert(0, "open_sans".to_owned());
 
     ctx.set_fonts(fonts);
-}
-
-fn create_tray() -> (TrayIcon, MenuId, MenuId) {
-    let menu = Menu::new();
-
-    let show = MenuItem::new("Show", true, None);
-    let quit = MenuItem::new("Quit", true, None);
-
-    let show_id = show.id().clone();
-    let quit_id = quit.id().clone();
-
-    menu.append(&show).unwrap();
-    menu.append(&quit).unwrap();
-
-    let tray = TrayIconBuilder::new()
-        .with_tooltip("Broken Remapper Running")
-        .with_menu(Box::new(menu))
-        .build()
-        .unwrap();
-
-    (tray, show_id, quit_id)
 }
