@@ -1,11 +1,12 @@
 #[cfg(target_os = "windows")]
 mod platform {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::ffi::c_int;
     use std::sync::{
         atomic::{AtomicI32, Ordering},
         Mutex, OnceLock,
     };
+    use std::time::{Duration, Instant};
 
     use crate::state::app_state::KeyMap;
 
@@ -15,62 +16,157 @@ mod platform {
         fn toggle_listener(enabled: c_int);
         fn press_key(vk: c_int);
         fn release_key(vk: c_int);
+        fn tap_key(vk: c_int);
     }
 
-    static REMAP_TABLE: OnceLock<Mutex<HashMap<i32, Vec<i32>>>> = OnceLock::new();
     static CALLBACK_REGISTERED: OnceLock<()> = OnceLock::new();
 
-    // UI key-capture state (for "record key into textbox")
-    static CAPTURE_SLOT: AtomicI32 = AtomicI32::new(-1);
+    // Reverse trigger index:
+    // key = replacement-combo canonical string, value = action to simulate.
+    static REVERSE_MAP: OnceLock<Mutex<HashMap<String, ReverseAction>>> = OnceLock::new();
 
-    fn remap_table() -> &'static Mutex<HashMap<i32, Vec<i32>>> {
-        REMAP_TABLE.get_or_init(|| Mutex::new(HashMap::new()))
+    // Live pressed keys (by vk) used to detect combo-down and combo-up.
+    static PRESSED_KEYS: OnceLock<Mutex<HashSet<i32>>> = OnceLock::new();
+
+    // Active hold combos -> broken key currently held down.
+    static ACTIVE_HOLDS: OnceLock<Mutex<HashMap<String, i32>>> = OnceLock::new();
+
+    // Capture mode:
+    // -1 = idle
+    // -2 = armed (recording)
+    static CAPTURE_MODE: AtomicI32 = AtomicI32::new(-1);
+
+    #[derive(Default)]
+    struct ComboCaptureState {
+        order: Vec<i32>,
+        down: HashMap<i32, bool>,
+        last_event_at: Option<Instant>,
+    }
+
+    static COMBO_CAPTURE: OnceLock<Mutex<ComboCaptureState>> = OnceLock::new();
+
+    const CAPTURE_IDLE_TIMEOUT_MS: u64 = 300;
+
+    #[derive(Clone, Debug)]
+    struct ReverseAction {
+        broken_vk: i32,
+        tap_once: bool,
+    }
+
+    fn reverse_map() -> &'static Mutex<HashMap<String, ReverseAction>> {
+        REVERSE_MAP.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    fn pressed_keys() -> &'static Mutex<HashSet<i32>> {
+        PRESSED_KEYS.get_or_init(|| Mutex::new(HashSet::new()))
+    }
+
+    fn active_holds() -> &'static Mutex<HashMap<String, i32>> {
+        ACTIVE_HOLDS.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    fn combo_capture() -> &'static Mutex<ComboCaptureState> {
+        COMBO_CAPTURE.get_or_init(|| Mutex::new(ComboCaptureState::default()))
+    }
+
+    fn is_capture_active() -> bool {
+        CAPTURE_MODE.load(Ordering::SeqCst) == -2
     }
 
     extern "C" fn key_event_callback(key: c_int, state: c_int) -> c_int {
-        let key = key as i32;
+        let vk = key as i32;
         let is_key_down = state == 1;
 
         println!(
             "[listener] key event: vk={} state={}",
-            key,
+            vk,
             if is_key_down { "down" } else { "up" }
         );
 
-        // Capture mode: on key-down, store vk for UI and swallow the key event.
-        if is_key_down {
-            let cur = CAPTURE_SLOT.load(Ordering::SeqCst);
-            if cur == -2 {
-                CAPTURE_SLOT.store(key, Ordering::SeqCst);
-                return 1;
+        // Focus-safe combo recording: swallow all keys while recording.
+        if is_capture_active() {
+            if let Ok(mut cap) = combo_capture().lock() {
+                cap.last_event_at = Some(Instant::now());
+                if is_key_down {
+                    if !cap.down.get(&vk).copied().unwrap_or(false) {
+                        cap.down.insert(vk, true);
+                        if !cap.order.contains(&vk) {
+                            cap.order.push(vk);
+                        }
+                    }
+                } else {
+                    cap.down.insert(vk, false);
+                }
             }
+            return 1;
         }
 
-        let table_guard = match remap_table().lock() {
-            Ok(g) => g,
-            Err(_) => return 0,
+        // Update pressed key set.
+        let current_keys = {
+            let mut guard = match pressed_keys().lock() {
+                Ok(g) => g,
+                Err(_) => return 0,
+            };
+
+            if is_key_down {
+                guard.insert(vk);
+            } else {
+                guard.remove(&vk);
+            }
+
+            guard.clone()
         };
 
-        let Some(targets) = table_guard.get(&key) else {
-            return 0;
-        };
+        let combo_key = canonical_combo_from_set(&current_keys);
 
-        if targets.is_empty() {
-            return 0;
+        // 1) Combo-down trigger (reverse mapping): replacement combo -> simulate broken key.
+        if is_key_down && !combo_key.is_empty() {
+            if let Ok(map_guard) = reverse_map().lock() {
+                if let Some(action) = map_guard.get(&combo_key).cloned() {
+                    if action.tap_once {
+                        unsafe { tap_key(action.broken_vk as c_int) };
+                    } else {
+                        // Hold mode: key down on combo match; key up when combo breaks.
+                        if let Ok(mut holds) = active_holds().lock() {
+                            if !holds.contains_key(&combo_key) {
+                                unsafe { press_key(action.broken_vk as c_int) };
+                                holds.insert(combo_key.clone(), action.broken_vk);
+                            }
+                        }
+                    }
+                    return 1;
+                }
+            }
         }
 
-        if is_key_down {
-            for &vk in targets {
-                unsafe { press_key(vk as c_int) };
+        // 2) Hold release check: if any active hold combo is no longer satisfied, release broken key.
+        // This runs on every event.
+        if let (Ok(mut holds), Ok(map_guard)) = (active_holds().lock(), reverse_map().lock()) {
+            let mut to_release: Vec<(String, i32)> = Vec::new();
+
+            for (combo, broken_vk) in holds.iter() {
+                let keys_required = parse_combo_to_vks(combo);
+                let still_active = keys_required.iter().all(|k| current_keys.contains(k));
+
+                // If combo no longer active OR mapping switched to tap_once/not found => release.
+                let still_valid_hold_mapping = map_guard
+                    .get(combo)
+                    .map(|a| !a.tap_once && a.broken_vk == *broken_vk)
+                    .unwrap_or(false);
+
+                if !still_active || !still_valid_hold_mapping {
+                    to_release.push((combo.clone(), *broken_vk));
+                }
             }
-        } else {
-            for &vk in targets.iter().rev() {
-                unsafe { release_key(vk as c_int) };
+
+            for (combo, broken_vk) in to_release {
+                unsafe { release_key(broken_vk as c_int) };
+                holds.remove(&combo);
             }
         }
 
-        // Block original key event when remapping happened.
-        1
+        // Let event pass when no reverse mapping consumed it.
+        0
     }
 
     pub fn init() {
@@ -85,6 +181,19 @@ mod platform {
             "[listener] {}",
             if enabled { "enabled" } else { "disabled" }
         );
+
+        if !enabled {
+            // Defensive cleanup for hold mode on disable.
+            if let Ok(mut holds) = active_holds().lock() {
+                for (_combo, broken_vk) in holds.drain() {
+                    unsafe { release_key(broken_vk as c_int) };
+                }
+            }
+            if let Ok(mut keys) = pressed_keys().lock() {
+                keys.clear();
+            }
+        }
+
         unsafe {
             toggle_listener(if enabled { 1 } else { 0 });
         }
@@ -93,42 +202,91 @@ mod platform {
     pub fn set_mappings(mappings: &[KeyMap]) {
         init();
 
-        let mut new_table: HashMap<i32, Vec<i32>> = HashMap::new();
+        let mut new_map: HashMap<String, ReverseAction> = HashMap::new();
 
         for map in mappings {
-            let Some(src) = parse_key(&map.broken_key) else {
+            let Some(broken_vk) = parse_key(&map.broken_key) else {
                 continue;
             };
-            let dst = parse_combo(&map.replacement_key);
-            if dst.is_empty() {
+
+            let replacement = parse_combo(&map.replacement_key);
+            if replacement.is_empty() {
                 continue;
             }
 
-            new_table.insert(src, dst);
+            let combo_key = canonical_combo_from_slice(&replacement);
+            if combo_key.is_empty() {
+                continue;
+            }
+
+            new_map.insert(
+                combo_key,
+                ReverseAction {
+                    broken_vk,
+                    tap_once: map.tap_once,
+                },
+            );
         }
 
-        if let Ok(mut guard) = remap_table().lock() {
-            *guard = new_table;
+        if let Ok(mut guard) = reverse_map().lock() {
+            *guard = new_map;
         }
     }
 
     pub fn begin_key_capture() {
         init();
-        CAPTURE_SLOT.store(-2, Ordering::SeqCst); // armed
+        CAPTURE_MODE.store(-2, Ordering::SeqCst);
+        if let Ok(mut cap) = combo_capture().lock() {
+            cap.order.clear();
+            cap.down.clear();
+            cap.last_event_at = None;
+        }
+        println!("[listener] combo capture started");
     }
 
     pub fn cancel_key_capture() {
-        CAPTURE_SLOT.store(-1, Ordering::SeqCst);
+        CAPTURE_MODE.store(-1, Ordering::SeqCst);
+        if let Ok(mut cap) = combo_capture().lock() {
+            cap.order.clear();
+            cap.down.clear();
+            cap.last_event_at = None;
+        }
+        println!("[listener] combo capture cancelled");
     }
 
-    pub fn poll_captured_vk() -> Option<i32> {
-        let v = CAPTURE_SLOT.load(Ordering::SeqCst);
-        if v >= 0 {
-            CAPTURE_SLOT.store(-1, Ordering::SeqCst);
-            Some(v)
-        } else {
-            None
+    pub fn poll_captured_combo_label() -> Option<String> {
+        if !is_capture_active() {
+            return None;
         }
+
+        let mut should_finish = false;
+        let mut label = String::new();
+
+        if let Ok(mut cap) = combo_capture().lock() {
+            let Some(last) = cap.last_event_at else {
+                return None;
+            };
+
+            if last.elapsed() >= Duration::from_millis(CAPTURE_IDLE_TIMEOUT_MS)
+                && !cap.order.is_empty()
+            {
+                let parts: Vec<String> = cap.order.iter().map(|&vk| vk_to_label(vk)).collect();
+                label = parts.join("+");
+                should_finish = true;
+
+                cap.order.clear();
+                cap.down.clear();
+                cap.last_event_at = None;
+            }
+        }
+
+        if should_finish {
+            CAPTURE_MODE.store(-1, Ordering::SeqCst);
+            println!("[listener] combo capture finished: {}", label);
+            return Some(label);
+        }
+
+        None
     }
 
     pub fn vk_to_label(vk: i32) -> String {
@@ -176,6 +334,43 @@ mod platform {
             0x7B => "F12".into(),
 
             _ => format!("VK_{vk}"),
+        }
+    }
+
+    fn canonical_combo_from_set(keys: &HashSet<i32>) -> String {
+        let v: Vec<i32> = keys.iter().copied().collect();
+        canonical_combo_from_slice(&v)
+    }
+
+    fn canonical_combo_from_slice(keys: &[i32]) -> String {
+        if keys.is_empty() {
+            return String::new();
+        }
+
+        let mut uniq: Vec<i32> = keys.to_vec();
+        uniq.sort_unstable();
+        uniq.dedup();
+
+        // deterministic modifier-first ordering
+        uniq.sort_by_key(|k| sort_rank(*k));
+
+        uniq.into_iter()
+            .map(vk_to_label)
+            .collect::<Vec<_>>()
+            .join("+")
+    }
+
+    fn parse_combo_to_vks(combo: &str) -> Vec<i32> {
+        parse_combo(combo)
+    }
+
+    fn sort_rank(vk: i32) -> i32 {
+        match vk {
+            0x11 => 0,        // Ctrl
+            0x10 => 1,        // Shift
+            0x12 => 2,        // Alt
+            0x5B | 0x5C => 3, // Win
+            _ => 10_000 + vk,
         }
     }
 
@@ -260,14 +455,11 @@ mod platform {
 
     pub fn begin_key_capture() {}
     pub fn cancel_key_capture() {}
-    pub fn poll_captured_vk() -> Option<i32> {
+    pub fn poll_captured_combo_label() -> Option<String> {
         None
-    }
-    pub fn vk_to_label(vk: i32) -> String {
-        format!("VK_{vk}")
     }
 }
 
 pub use platform::{
-    begin_key_capture, cancel_key_capture, poll_captured_vk, set_enabled, set_mappings, vk_to_label,
+    begin_key_capture, cancel_key_capture, poll_captured_combo_label, set_enabled, set_mappings,
 };

@@ -3,22 +3,7 @@ use crate::state::app_state::{AppState, KeyMap};
 use eframe::egui::{self, Color32, RichText};
 
 pub fn show(ctx: &egui::Context, state: &mut AppState) {
-    if let Some(vk) = keyboard_listener::poll_captured_vk() {
-        if let Some((idx, is_replacement)) = state.mapping_record_target {
-            if let Some(map) = state.mappings.get_mut(idx) {
-                let key_text = keyboard_listener::vk_to_label(vk);
-                if is_replacement {
-                    map.replacement_key = key_text;
-                } else {
-                    map.broken_key = key_text;
-                }
-            }
-        }
-        state.mapping_record_target = None;
-    }
-
     egui::CentralPanel::default().show(ctx, |ui| {
-        // Outer padding frame for a cleaner layout
         egui::Frame::NONE
             .inner_margin(egui::Margin {
                 left: 16,
@@ -27,11 +12,9 @@ pub fn show(ctx: &egui::Context, state: &mut AppState) {
                 bottom: 16,
             })
             .show(ui, |ui| {
-                // --- Header Area ---
                 ui.horizontal(|ui| {
                     ui.heading(RichText::new("⌨ Key Remapper").size(28.0).strong());
 
-                    // Listener Toggle Button (Right Aligned)
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let (text, color) = if state.listener_enabled {
                             ("🟢 Active", Color32::from_rgb(100, 255, 100))
@@ -64,11 +47,9 @@ pub fn show(ctx: &egui::Context, state: &mut AppState) {
                 ui.separator();
                 ui.add_space(16.0);
 
-                // --- Mappings Header ---
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("Your Mappings").size(18.0).strong());
 
-                    // Add Button (Right Aligned)
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let add_btn = egui::Button::new(RichText::new("➕ Add Mapping").strong())
                             .min_size(egui::vec2(120.0, 28.0))
@@ -78,6 +59,7 @@ pub fn show(ctx: &egui::Context, state: &mut AppState) {
                             state.mappings.push(KeyMap {
                                 broken_key: "".to_string(),
                                 replacement_key: "".to_string(),
+                                tap_once: true,
                             });
                         }
                     });
@@ -85,12 +67,10 @@ pub fn show(ctx: &egui::Context, state: &mut AppState) {
 
                 ui.add_space(16.0);
 
-                // --- Mappings List ---
                 egui::ScrollArea::vertical()
                     .auto_shrink([false; 2])
                     .show(ui, |ui| {
                         if state.mappings.is_empty() {
-                            // Empty State
                             ui.add_space(60.0);
                             ui.vertical_centered(|ui| {
                                 ui.label(
@@ -109,11 +89,9 @@ pub fn show(ctx: &egui::Context, state: &mut AppState) {
 
                             for (idx, map) in state.mappings.iter_mut().enumerate() {
                                 ui.group(|ui| {
-                                    // Make the group take full available width
                                     ui.set_width(ui.available_width());
 
                                     ui.horizontal(|ui| {
-                                        // Left side: Broken Key
                                         ui.vertical(|ui| {
                                             ui.label(
                                                 RichText::new("Broken Key")
@@ -128,8 +106,8 @@ pub fn show(ctx: &egui::Context, state: &mut AppState) {
                                                         .hint_text("e.g. A"),
                                                 );
 
-                                                let broken_recording = state.mapping_record_target
-                                                    == Some((idx, false));
+                                                let broken_recording =
+                                                    state.mapping_record_target == Some((idx, false));
 
                                                 let broken_record_label = if broken_recording {
                                                     "⏺ Recording..."
@@ -153,7 +131,19 @@ pub fn show(ctx: &egui::Context, state: &mut AppState) {
                                                     if broken_recording {
                                                         keyboard_listener::cancel_key_capture();
                                                         state.mapping_record_target = None;
+
+                                                        if state.listener_restore_after_recording {
+                                                            state.listener_enabled = true;
+                                                            state.listener_restore_after_recording =
+                                                                false;
+                                                        }
                                                     } else {
+                                                        state.listener_restore_after_recording =
+                                                            state.listener_enabled;
+                                                        if state.listener_enabled {
+                                                            state.listener_enabled = false;
+                                                        }
+
                                                         state.mapping_record_target =
                                                             Some((idx, false));
                                                         keyboard_listener::begin_key_capture();
@@ -164,15 +154,13 @@ pub fn show(ctx: &egui::Context, state: &mut AppState) {
 
                                         ui.add_space(12.0);
 
-                                        // Arrow Indicator
                                         ui.vertical(|ui| {
-                                            ui.add_space(16.0); // Align with text box visually
+                                            ui.add_space(16.0);
                                             ui.label(RichText::new("➡").size(18.0));
                                         });
 
                                         ui.add_space(12.0);
 
-                                        // Right side: Replacement Key
                                         ui.vertical(|ui| {
                                             ui.label(
                                                 RichText::new("Replacement / Combo")
@@ -189,8 +177,8 @@ pub fn show(ctx: &egui::Context, state: &mut AppState) {
                                                     .hint_text("e.g. B or Ctrl+C"),
                                                 );
 
-                                                let repl_recording = state.mapping_record_target
-                                                    == Some((idx, true));
+                                                let repl_recording =
+                                                    state.mapping_record_target == Some((idx, true));
 
                                                 let repl_record_label = if repl_recording {
                                                     "⏺ Recording..."
@@ -201,8 +189,7 @@ pub fn show(ctx: &egui::Context, state: &mut AppState) {
                                                 if ui
                                                     .add(
                                                         egui::Button::new(
-                                                            RichText::new(repl_record_label)
-                                                                .small(),
+                                                            RichText::new(repl_record_label).small(),
                                                         )
                                                         .corner_radius(6.0),
                                                     )
@@ -214,7 +201,19 @@ pub fn show(ctx: &egui::Context, state: &mut AppState) {
                                                     if repl_recording {
                                                         keyboard_listener::cancel_key_capture();
                                                         state.mapping_record_target = None;
+
+                                                        if state.listener_restore_after_recording {
+                                                            state.listener_enabled = true;
+                                                            state.listener_restore_after_recording =
+                                                                false;
+                                                        }
                                                     } else {
+                                                        state.listener_restore_after_recording =
+                                                            state.listener_enabled;
+                                                        if state.listener_enabled {
+                                                            state.listener_enabled = false;
+                                                        }
+
                                                         state.mapping_record_target =
                                                             Some((idx, true));
                                                         keyboard_listener::begin_key_capture();
@@ -223,7 +222,24 @@ pub fn show(ctx: &egui::Context, state: &mut AppState) {
                                             });
                                         });
 
-                                        // Far right: Delete button
+                                        ui.add_space(12.0);
+
+                                        ui.vertical(|ui| {
+                                            ui.label(
+                                                RichText::new("Behavior")
+                                                    .small()
+                                                    .color(Color32::GRAY),
+                                            );
+
+                                            ui.checkbox(
+                                                &mut map.tap_once,
+                                                "Tap once (otherwise hold while combo held)",
+                                            )
+                                            .on_hover_text(
+                                                "When checked: trigger broken key once on combo.\nWhen unchecked: mirror key down/up.",
+                                            );
+                                        });
+
                                         ui.with_layout(
                                             egui::Layout::right_to_left(egui::Align::Center),
                                             |ui| {
@@ -250,7 +266,6 @@ pub fn show(ctx: &egui::Context, state: &mut AppState) {
                                 ui.add_space(8.0);
                             }
 
-                            // Clean up removed items outside the loop
                             if let Some(i) = to_remove {
                                 if state
                                     .mapping_record_target
@@ -259,6 +274,11 @@ pub fn show(ctx: &egui::Context, state: &mut AppState) {
                                 {
                                     keyboard_listener::cancel_key_capture();
                                     state.mapping_record_target = None;
+
+                                    if state.listener_restore_after_recording {
+                                        state.listener_enabled = true;
+                                        state.listener_restore_after_recording = false;
+                                    }
                                 }
 
                                 state.mappings.remove(i);

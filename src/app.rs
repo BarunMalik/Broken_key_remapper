@@ -95,16 +95,21 @@ impl eframe::App for MyApp {
         }
 
         if let Some((target_idx, is_replacement)) = self.state.mapping_record_target {
-            if let Some(vk) = keyboard_listener::poll_captured_vk() {
-                let key_text = keyboard_listener::vk_to_label(vk);
+            if let Some(combo_text) = keyboard_listener::poll_captured_combo_label() {
                 if let Some(map) = self.state.mappings.get_mut(target_idx) {
                     if is_replacement {
-                        map.replacement_key = key_text;
+                        map.replacement_key = combo_text;
                     } else {
-                        map.broken_key = key_text;
+                        map.broken_key = combo_text;
                     }
                 }
+
                 self.state.mapping_record_target = None;
+
+                if self.state.listener_restore_after_recording {
+                    self.state.listener_enabled = true;
+                    self.state.listener_restore_after_recording = false;
+                }
             }
         }
 
