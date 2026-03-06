@@ -1,7 +1,22 @@
+use crate::services::keyboard_listener;
 use crate::state::app_state::{AppState, KeyMap};
 use eframe::egui::{self, Color32, RichText};
 
 pub fn show(ctx: &egui::Context, state: &mut AppState) {
+    if let Some(vk) = keyboard_listener::poll_captured_vk() {
+        if let Some((idx, is_replacement)) = state.mapping_record_target {
+            if let Some(map) = state.mappings.get_mut(idx) {
+                let key_text = keyboard_listener::vk_to_label(vk);
+                if is_replacement {
+                    map.replacement_key = key_text;
+                } else {
+                    map.broken_key = key_text;
+                }
+            }
+        }
+        state.mapping_record_target = None;
+    }
+
     egui::CentralPanel::default().show(ctx, |ui| {
         // Outer padding frame for a cleaner layout
         egui::Frame::NONE
@@ -105,11 +120,46 @@ pub fn show(ctx: &egui::Context, state: &mut AppState) {
                                                     .small()
                                                     .color(Color32::GRAY),
                                             );
-                                            ui.add(
-                                                egui::TextEdit::singleline(&mut map.broken_key)
-                                                    .desired_width(140.0)
-                                                    .hint_text("e.g. A"),
-                                            );
+
+                                            ui.horizontal(|ui| {
+                                                ui.add(
+                                                    egui::TextEdit::singleline(&mut map.broken_key)
+                                                        .desired_width(140.0)
+                                                        .hint_text("e.g. A"),
+                                                );
+
+                                                let broken_recording = state.mapping_record_target
+                                                    == Some((idx, false));
+
+                                                let broken_record_label = if broken_recording {
+                                                    "⏺ Recording..."
+                                                } else {
+                                                    "⏺ Record"
+                                                };
+
+                                                if ui
+                                                    .add(
+                                                        egui::Button::new(
+                                                            RichText::new(broken_record_label)
+                                                                .small(),
+                                                        )
+                                                        .corner_radius(6.0),
+                                                    )
+                                                    .on_hover_text(
+                                                        "Click and press a key for Broken Key",
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    if broken_recording {
+                                                        keyboard_listener::cancel_key_capture();
+                                                        state.mapping_record_target = None;
+                                                    } else {
+                                                        state.mapping_record_target =
+                                                            Some((idx, false));
+                                                        keyboard_listener::begin_key_capture();
+                                                    }
+                                                }
+                                            });
                                         });
 
                                         ui.add_space(12.0);
@@ -129,13 +179,48 @@ pub fn show(ctx: &egui::Context, state: &mut AppState) {
                                                     .small()
                                                     .color(Color32::GRAY),
                                             );
-                                            ui.add(
-                                                egui::TextEdit::singleline(
-                                                    &mut map.replacement_key,
-                                                )
-                                                .desired_width(180.0)
-                                                .hint_text("e.g. B or Ctrl+C"),
-                                            );
+
+                                            ui.horizontal(|ui| {
+                                                ui.add(
+                                                    egui::TextEdit::singleline(
+                                                        &mut map.replacement_key,
+                                                    )
+                                                    .desired_width(180.0)
+                                                    .hint_text("e.g. B or Ctrl+C"),
+                                                );
+
+                                                let repl_recording = state.mapping_record_target
+                                                    == Some((idx, true));
+
+                                                let repl_record_label = if repl_recording {
+                                                    "⏺ Recording..."
+                                                } else {
+                                                    "⏺ Record"
+                                                };
+
+                                                if ui
+                                                    .add(
+                                                        egui::Button::new(
+                                                            RichText::new(repl_record_label)
+                                                                .small(),
+                                                        )
+                                                        .corner_radius(6.0),
+                                                    )
+                                                    .on_hover_text(
+                                                        "Click and press a key for Replacement",
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    if repl_recording {
+                                                        keyboard_listener::cancel_key_capture();
+                                                        state.mapping_record_target = None;
+                                                    } else {
+                                                        state.mapping_record_target =
+                                                            Some((idx, true));
+                                                        keyboard_listener::begin_key_capture();
+                                                    }
+                                                }
+                                            });
                                         });
 
                                         // Far right: Delete button
@@ -167,7 +252,22 @@ pub fn show(ctx: &egui::Context, state: &mut AppState) {
 
                             // Clean up removed items outside the loop
                             if let Some(i) = to_remove {
+                                if state
+                                    .mapping_record_target
+                                    .map(|(record_idx, _)| record_idx == i)
+                                    .unwrap_or(false)
+                                {
+                                    keyboard_listener::cancel_key_capture();
+                                    state.mapping_record_target = None;
+                                }
+
                                 state.mappings.remove(i);
+
+                                if let Some((record_idx, field)) = state.mapping_record_target {
+                                    if record_idx > i {
+                                        state.mapping_record_target = Some((record_idx - 1, field));
+                                    }
+                                }
                             }
                         }
                     });

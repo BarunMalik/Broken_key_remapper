@@ -1,3 +1,5 @@
 /target
 temp.txt
 config.toml
+c_src/test.c
+*.exe

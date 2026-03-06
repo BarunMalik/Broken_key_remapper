@@ -1,5 +1,6 @@
+use crate::services::keyboard_listener;
 use crate::services::system_tray::init_tray;
-use crate::state::app_state::AppState;
+use crate::state::app_state::{AppState, KeyMap};
 use crate::state::helper::was_auto_launched;
 use crate::ui;
 use eframe::egui;
@@ -10,6 +11,9 @@ pub struct MyApp {
     tray: Option<TrayIcon>,
     /// True only on the very first frame — used to minimize if auto-launched.
     first_frame: bool,
+    listener_initialized: bool,
+    last_listener_enabled: bool,
+    last_mappings: Vec<KeyMap>,
 }
 
 impl MyApp {
@@ -39,17 +43,23 @@ impl MyApp {
         let start_minimized = was_auto_launched();
 
         if state.task_bar {
-            let tray = Self::create_tray(cc.egui_ctx.clone(), false);
+            let tray = Self::create_tray(cc.egui_ctx.clone(), true);
             Self {
                 state,
                 tray: Some(tray),
                 first_frame: start_minimized,
+                listener_initialized: false,
+                last_listener_enabled: false,
+                last_mappings: Vec::new(),
             }
         } else {
             Self {
                 state,
                 tray: None,
                 first_frame: start_minimized,
+                listener_initialized: false,
+                last_listener_enabled: false,
+                last_mappings: Vec::new(),
             }
         }
     }
@@ -66,6 +76,38 @@ impl eframe::App for MyApp {
             }
         }
 
+        if !self.listener_initialized {
+            keyboard_listener::set_mappings(&self.state.mappings);
+            keyboard_listener::set_enabled(self.state.listener_enabled);
+            self.last_listener_enabled = self.state.listener_enabled;
+            self.last_mappings = self.state.mappings.clone();
+            self.listener_initialized = true;
+        } else {
+            if self.state.mappings != self.last_mappings {
+                keyboard_listener::set_mappings(&self.state.mappings);
+                self.last_mappings = self.state.mappings.clone();
+            }
+
+            if self.state.listener_enabled != self.last_listener_enabled {
+                keyboard_listener::set_enabled(self.state.listener_enabled);
+                self.last_listener_enabled = self.state.listener_enabled;
+            }
+        }
+
+        if let Some((target_idx, is_replacement)) = self.state.mapping_record_target {
+            if let Some(vk) = keyboard_listener::poll_captured_vk() {
+                let key_text = keyboard_listener::vk_to_label(vk);
+                if let Some(map) = self.state.mappings.get_mut(target_idx) {
+                    if is_replacement {
+                        map.replacement_key = key_text;
+                    } else {
+                        map.broken_key = key_text;
+                    }
+                }
+                self.state.mapping_record_target = None;
+            }
+        }
+
         // --- Minimize Instead of Close ---
         if self.state.run_in_background {
             if ctx.input(|i| i.viewport().close_requested()) {
@@ -79,7 +121,7 @@ impl eframe::App for MyApp {
 
         // --- Dynamic Tray Toggle ---
         if self.state.task_bar && self.tray.is_none() {
-            let tray = Self::create_tray(ctx.clone(), false);
+            let tray = Self::create_tray(ctx.clone(), true);
             self.tray = Some(tray);
         }
 

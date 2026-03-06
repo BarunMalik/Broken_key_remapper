@@ -1,30 +1,46 @@
 #include <windows.h>
-#include <stdio.h>
 #include "keyboard.h"
 
-static HHOOK keyboard_hook;
+static HHOOK keyboard_hook = NULL;
+static key_callback callback = NULL;
+static volatile LONG suppress_injected_events = 1;
+
+static HANDLE hook_thread = NULL;
+static DWORD hook_thread_id = 0;
+
+void register_key_callback(key_callback cb)
+{
+    callback = cb;
+}
 
 LRESULT CALLBACK keyboard_proc(int nCode, WPARAM wParam, LPARAM lParam)
 {
-    if (nCode == HC_ACTION)
+    if (nCode == HC_ACTION && callback != NULL)
     {
         KBDLLHOOKSTRUCT *p = (KBDLLHOOKSTRUCT *)lParam;
 
-        if (wParam == WM_KEYDOWN)
+        if (suppress_injected_events && (p->flags & LLKHF_INJECTED))
+            return CallNextHookEx(keyboard_hook, nCode, wParam, lParam);
+
+        if (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN)
         {
-            printf("Key pressed: %d\n", p->vkCode);
+            int should_block = callback((int)p->vkCode, 1);
+            if (should_block)
+                return 1;
         }
 
-        if (wParam == WM_KEYUP)
+        if (wParam == WM_KEYUP || wParam == WM_SYSKEYUP)
         {
-            printf("Key released: %d\n", p->vkCode);
+            int should_block = callback((int)p->vkCode, 0);
+            if (should_block)
+                return 1;
         }
     }
 
     return CallNextHookEx(keyboard_hook, nCode, wParam, lParam);
 }
 
-void start_keyboard_hook()
+DWORD WINAPI hook_thread_func(LPVOID param)
 {
     keyboard_hook = SetWindowsHookEx(
         WH_KEYBOARD_LL,
@@ -34,16 +50,56 @@ void start_keyboard_hook()
     );
 
     MSG msg;
+
     while (GetMessage(&msg, NULL, 0, 0))
     {
         TranslateMessage(&msg);
         DispatchMessage(&msg);
     }
+
+    return 0;
 }
 
-void stop_keyboard_hook()
+void start_listener()
 {
-    UnhookWindowsHookEx(keyboard_hook);
+    if (hook_thread != NULL)
+        return;
+
+    hook_thread = CreateThread(
+        NULL,
+        0,
+        hook_thread_func,
+        NULL,
+        0,
+        &hook_thread_id
+    );
+}
+
+void stop_listener()
+{
+    if (hook_thread == NULL)
+        return;
+
+    PostThreadMessage(hook_thread_id, WM_QUIT, 0, 0);
+
+    WaitForSingleObject(hook_thread, INFINITE);
+
+    CloseHandle(hook_thread);
+    hook_thread = NULL;
+
+    if (keyboard_hook)
+    {
+        UnhookWindowsHookEx(keyboard_hook);
+        keyboard_hook = NULL;
+    }
+}
+
+void toggle_listener(int enabled)
+{
+    if (enabled)
+        start_listener();
+    else
+        stop_listener();
 }
 
 void press_key(int vk)

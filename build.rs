@@ -1,13 +1,13 @@
 fn main() {
-    // Re-run build script if C sources or this script change.
-    println!("cargo:rerun-if-changed=c_src/math_helpers.c");
-    println!("cargo:rerun-if-changed=build.rs");
+    #[cfg(target_os = "windows")]
+    {
+        cc::Build::new()
+            .file("c_src/keyboard.c")
+            .include("c_src")
+            .flag_if_supported("/W4")
+            .compile("keyboard_listener");
 
-    // Compile C source into a static library.
-    cc::Build::new()
-        .file("c_src/math_helpers.c")
-        .compile("math_helpers");
-
-    // Link against the produced static library.
-    println!("cargo:rustc-link-lib=static=math_helpers");
+        println!("cargo:rerun-if-changed=c_src/keyboard.c");
+        println!("cargo:rerun-if-changed=c_src/keyboard.h");
+    }
 }
